@@ -1,0 +1,167 @@
+---
+title: "Factor Analysis on Ash Data"
+author: "Navankur Verma - navankurverma@gmail.com"
+date: "12/05/2020"
+output:
+  html_document:
+    fig_caption: yes
+    theme: cerulean
+    toc: yes
+    toc_float:
+      smooth_scroll: FALSE
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(viridis)
+knitr::opts_chunk$set(echo = TRUE, fig.width = 6, fig.height = 5, fig.align = "center")
+```
+
+## Load Data:
+
+Data were collected from 99 ash samples originating from different biomasses. For each ash sample the Softening Temperature (SOT) in degrees centigrade was recorded. The mass concentrations of each of eight elements (P2O5, SiO2, Fe2O3, Al2O3, CaO, MgO, Na2O, K2O) was also experimentally determined for each ash sample.
+
+```{r, fig.height=5, fig.width=6}
+ash <- read.csv("AshData.csv")
+
+set.seed(1234)
+
+library(ggridges) #Used to plot overlaid distribution of each variable
+pivot_longer(ash[,c(2:9)], cols = c(1:8), names_to = "Element",
+             values_to = "Concentration") %>%
+    ggplot(aes(x = Concentration, y = Element, height = ..ndensity..))+
+    geom_density_ridges(stat = "density", scale = 2,alpha = 0.4) +
+    scale_x_continuous(limits = c(-10, 130)) + ggtitle("Distribution of each Element")
+```
+
+Densities of $P_{2}O_{5}$, $Na_{2}O$, MgO, $Fe_{2}O_{3}$, $Al_{2}O_{3}$ are heavily positive skewed. It would be better to transform these variables so the assumptions of factor analysis are met. Since all the values are positive we can perform either square root transformation or log transformation based on skewness.
+
+```{r, fig.width=6, fig.height=3}
+trans <- colnames(ash)[c(2,5,8,7,4)] #picking positively skewed variables
+trans
+#Function to plot Original, Log & Square root transformed variable densities:
+trans.dens <- function(data, variable) {
+  plot(density(log(data[, variable])), 
+       ylim = c(0, max(density(sqrt(data[, variable]))$y) ),
+       xlim = c(min(min(density((data[, variable]))$x),
+                    min(density(sqrt(data[, variable]))$x),
+                    min(density(log(data[, variable]))$x))-1,
+                max(quantile(data[, variable], probs = 0.95),
+                    max(density(sqrt(data[, variable]))$x),
+                    min(density(log(data[, variable]))$x))),
+       main = paste("Distribution of", variable))
+  lines(density(sqrt(data[, variable])), col = "blue")
+  lines(density(data[, variable]), col = "red")
+}
+
+par(mfrow = c(1,2))
+plot(c(1,10), c(1,10), type = "n", axes = FALSE,xlab = "",ylab = "")#Dummy plot for legend
+legend("topright", legend = c("Original", "Square root Transform", "Log Transform"),
+    fill = c("red", "blue", "black"), cex = 0.7)
+for (i in 1:5) {
+  trans.dens(ash,trans[i])
+}
+par(mfrow = c(1,1))
+
+ash.man <- ash #creating dataset to store manually transformed variables
+ash.man[,c("P2O5","Al2O3","Fe2O3")] <- sqrt(ash.man[,c("P2O5","Al2O3","Fe2O3")])
+ash.man[,c("Na2O","MgO")] <- log(ash.man[,c("Na2O","MgO")])
+```
+
+Based on above densitites square root transformation can be applied on $P_{2}O_{5}$, $Fe_{2}O_{3}$, $Al_{2}O_{3}$ and log transformation can be applied on $Na_{2}O$ & MgO, while $SiO_{2}$, $K_{2}O$ & $CaO$ can be left as it is. Although for simplicity, these transformation are suitable but they do not work that well, as some variable are converted into multimodal. To get to a perfect transformed version of each variable, here `bestNormalize` R package will be used, which performs Normality test on each transformation using Pearsons P statistic. It has wide range of transformations available which are applied one by one and the one which gives least value of Pearson P Statistic is finally selected as best suited transformation. For learning purpose, factor analysis is performed on both the transformed data.
+
+```{r fig.height=5, fig.width=6, warning=FALSE}
+library(bestNormalize)
+for (i in 1:5) { #iterating for each variable
+  best_dens_trans <- bestNormalize(ash[,trans[i]], loo = TRUE) #using Leave-One-Out CV
+  print(paste("For Variable", trans[i], "best transformation is:",
+              names(sort(best_dens_trans$norm_stats, decreasing = FALSE))[1]))
+  ash[,trans[i]] <- best_dens_trans$x.t #replacing with transformed values into dataset
+}
+
+pivot_longer(ash[, trans], cols = c(1:5), names_to = "Element",
+             values_to = "Concentration") %>% 
+  ggplot(aes(x = Concentration, y = Element, height = ..ndensity..)) + 
+  geom_density_ridges(stat = "density", scale = 2, alpha = 0.4) +
+  scale_x_continuous(limits = c(-5, 5)) + ggtitle("Distribution of Transformed Elements")
+```
+
+All the variables are perfectly transformed to have normal distribution. The `bestNormalize` package also gives ability to reverse transform the variables for interpretation using `predict` function with `inverse` parameter set to `TRUE`.
+
+## Factor Analysis using VariMax Rotation
+
+```{r, fig.height=4, warning=FALSE}
+#Creating function to select optimal number of factors for the given dataset:
+fac.analysis <- function(dat) {
+  P_Value <- vector("numeric", 4) #Vector to store Chi-Square test p-Values
+  cum_var <- vector("numeric", 4) #Vector to store Cumulative Proportion of Variances
+  factors <- c(2:5) #Number of factors with which factor analysis will be tried
+  for (i in factors) {
+    tryCatch({
+      ashfit <- factanal(dat[, c(2:9)], i, rotation = "varimax", scores = "regression")
+      P_Value[i - 1] <- ashfit$PVAL
+      #Total variance explained by each Factor,by squaring and summing loadings factor wise
+      prop_var <- apply(matrix(ashfit$loadings, 8, i, byrow = FALSE), 2,
+                        FUN = function(x) {sum(x ^ 2)})/8
+      #Division by 8 as total variance=8 (unity variance of each of 8 variables)
+      
+      cum_var[i - 1] <- tail(cumsum(prop_var), 1)
+      cat(capture.output(print(ashfit))[25:27], sep = "\n")
+      cat("\n")
+    },
+    error = function(err) {
+      cat("ERROR OF:\"", conditionMessage(err), "\" OCCURRED\n")
+    })
+  }
+  
+  par(mfrow = c(1, 2))
+  plot( factors, P_Value, type = "b", xaxt = "n", main = "Chi-Square test P-value",
+    xlab = "Number of factors")
+  axis(1, at = factors)
+  abline(h = 0.05, lty = 2, col = "red")
+  
+  plot(factors, cum_var, type = "b", xaxt = "n", ylab = "Proportion of Variance",
+    main = "Proportion of Variance", xlab = "Number of factors")
+  axis(1, at = factors)
+  par(mfrow = c(1, 1))
+}
+
+fac.analysis(dat = ash.man) #First applying Factor Analysis on manually transformed data
+fac.analysis(dat = ash) #Applying Factor analysis on dataset transformed with `bestNormalize`
+```
+
+Based on p-Values of Chi-Squared test for different number of factors on both the transformed versions of data, 4 is a suitable number of factors to represent the 8 Mass Concentration variables. And also by construction, 4 factors gives highest proportion of variance explained. So creating 4 factors based on the data transformed by `bestNormalize`:
+
+```{r, fig.height=6, fig.width=6}
+ashfit <- factanal(ash[, c(2:9)], 4, rotation = "varimax",
+                       scores = "regression")
+ashfit$loadings
+```
+
+Factor 1 broadly has higher correlation with concentration variables of $Fe_{2}O_{3}$, $Al_{2}O_{3}$ & $Na_{2}O$, while it has approximately zero loadings for MgO &$P_{2}O_{5}$ variable.
+
+Factor 2 mainly represents concentration of Cao, MgO and $SiO_{2}$, ,  and  and almost negligible loading of $Na_{2}O$ and $K_{2}O$ variable.
+
+## Factor Scores 
+
+```{r, fig.width=7, fig.height=6}
+ash$Factor1 <- ashfit$scores[,1]
+
+ggplot(ash, aes(x = Factor1, y = SOT,label=rownames(ash) )) + 
+  geom_point(alpha  = 0.6) + 
+  geom_smooth(formula = y~x, method = "lm") +
+  geom_text(aes(label=rownames(ash)), hjust=1.3)
+```
+
+There seems to be a positive correlation between the scores from Factor 1 and SOT of ash samples. Although there are some samples with exceptional SOT values for normal Factor 1 scores, points like sample #1, #2, #3, #68, #21 have very low SOT values and #61 ,#62, #97, #51 have high SOT values even though their Factor 1 scores are nearly same. This warrants for further checks to test outliers and the validity of the Factor Scores.
+
+## References:
+
+1. Claus O. Wilke (2020). 'ggridges': Ridgeline Plots in 'ggplot2'.   
+   R package version 0.5.2.  
+   https://CRAN.R-project.org/package=ggridges
+
+2. Ryan A. Peterson and Joseph E. Cavanaugh (2019). 'bestNormalize': Ordered quantile normalization: a semiparametric transformation built for the cross-validation 
+  era. Journal of Applied Statistics, 1-16.
+  https://doi.org/10.1080/02664763.2019.1630372
